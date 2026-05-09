@@ -2,7 +2,7 @@
   "id": "anime3rb",
   "name": "Anime3rb",
   "description": "Arabic online streaming provider for Anime3rb.com",
-  "manifestURI": "",
+  "manifestURI": "https://raw.githubusercontent.com/56cla/anime3rb-seanime/main/anime3rb.json",
   "version": "0.1.0",
   "author": "503",
   "type": "onlinestream-provider",
