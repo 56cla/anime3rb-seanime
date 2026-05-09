@@ -8,6 +8,14 @@ type Anime3rbVideoSource = {
     premium: boolean
 }
 
+type Anime3rbSearchItem = {
+    slug: string
+    name: string
+    name_en: string
+    poster: string
+    type: string
+}
+
 class Provider {
     api = "https://anime3rb.com"
     videoApi = "https://video.vid3rb.com"
@@ -24,75 +32,98 @@ class Provider {
         const query = (opts.query || opts.media.romajiTitle || opts.media.englishTitle || "").trim()
         if (!query) return []
 
-        const html = await this.fetchText(
-            `${this.api}/titles/list?q=${encodeURIComponent(query)}`,
-            this.api + "/"
-        )
+        // جرب الـ API الداخلي أولاً (أسرع وأقل عرضة للبلوك)
+        try {
+            const apiRes = await this.fetchText(
+                `${this.api}/api/search?q=${encodeURIComponent(query)}`,
+                this.api + "/"
+            )
+            const data = JSON.parse(apiRes)
+            const items: Anime3rbSearchItem[] = data.data || data.results || data || []
 
-        const results: SearchResult[] = []
-        const seen: { [key: string]: boolean } = {}
-
-        // استخراج slugs عبر regex بدل LoadDoc لأن الموقع قد يكون dynamic
-        const slugRegex = /href="\/titles\/([^"/?#]+)"/g
-        const titleRegex = /class="[^"]*(?:title|name)[^"]*"[^>]*>([^<]{2,80})</g
-        const imgRegex = /href="\/titles\/[^"]+"\s[^>]*>\s*<img[^>]+src="([^"]+)"/g
-
-        const slugs: string[] = []
-        let m: RegExpExecArray | null
-
-        while ((m = slugRegex.exec(html)) !== null) {
-            const slug = m[1].trim()
-            if (slug && slug !== "list" && !seen[slug]) {
-                seen[slug] = true
-                slugs.push(slug)
+            if (Array.isArray(items) && items.length > 0) {
+                return items.slice(0, 25).map((item) => ({
+                    id: item.slug,
+                    title: item.name || item.name_en || this.titleFromSlug(item.slug),
+                    url: `${this.api}/titles/${item.slug}`,
+                    subOrDub: "sub",
+                }))
             }
-        }
+        } catch (_) {}
 
-        // محاولة مطابقة العناوين مع الـ slugs
-        const titles: string[] = []
-        while ((m = titleRegex.exec(html)) !== null) {
-            const t = this.cleanTitle(m[1])
-            if (t && t.length > 1) titles.push(t)
-        }
+        // fallback: جرب endpoint ثاني
+        try {
+            const apiRes2 = await this.fetchText(
+                `${this.api}/api/titles?search=${encodeURIComponent(query)}`,
+                this.api + "/"
+            )
+            const data2 = JSON.parse(apiRes2)
+            const items2: Anime3rbSearchItem[] = data2.data || data2 || []
 
-        for (let i = 0; i < slugs.length && i < 25; i++) {
-            const slug = slugs[i]
-            results.push({
-                id: slug,
-                title: titles[i] || this.titleFromSlug(slug),
-                url: `${this.api}/titles/${slug}`,
-                subOrDub: "sub",
-            })
-        }
+            if (Array.isArray(items2) && items2.length > 0) {
+                return items2.slice(0, 25).map((item) => ({
+                    id: item.slug,
+                    title: item.name || item.name_en || this.titleFromSlug(item.slug),
+                    url: `${this.api}/titles/${item.slug}`,
+                    subOrDub: "sub",
+                }))
+            }
+        } catch (_) {}
 
-        // fallback: جرب LoadDoc إذا regex ما أعطى نتائج
-        if (results.length === 0) {
-            try {
-                const $ = LoadDoc(html)
-                $("a[href*='/titles/']").each((_, el) => {
-                    const href = $(el).attr("href") || ""
-                    const slug = this.titleSlugFromUrl(this.absoluteUrl(href))
-                    if (!slug || slug === "list" || seen[slug]) return
-                    const title = this.cleanTitle(
-                        $(el).find(".title-name, h2, h3").first().text() || $(el).text()
-                    )
-                    if (!title || title.length < 2) return
+        // fallback أخير: HTML scraping
+        try {
+            const html = await this.fetchText(
+                `${this.api}/titles/list?q=${encodeURIComponent(query)}`,
+                this.api + "/"
+            )
+            const results: SearchResult[] = []
+            const seen: { [key: string]: boolean } = {}
+            const slugRegex = /href="\/titles\/([^"/?#]+)"/g
+            let m: RegExpExecArray | null
+
+            while ((m = slugRegex.exec(html)) !== null) {
+                const slug = m[1].trim()
+                if (slug && slug !== "list" && !seen[slug]) {
                     seen[slug] = true
                     results.push({
                         id: slug,
-                        title,
+                        title: this.titleFromSlug(slug),
                         url: `${this.api}/titles/${slug}`,
                         subOrDub: "sub",
                     })
-                })
-            } catch (_) {}
-        }
+                }
+            }
+            return results.slice(0, 25)
+        } catch (_) {}
 
-        return results.slice(0, 25)
+        return []
     }
 
     async findEpisodes(id: string): Promise<EpisodeDetails[]> {
         const slug = this.titleSlugFromUrl(id) || id
+
+        // جرب API أولاً
+        try {
+            const apiRes = await this.fetchText(
+                `${this.api}/api/titles/${slug}/episodes`,
+                `${this.api}/titles/${slug}`
+            )
+            const data = JSON.parse(apiRes)
+            const items = data.data || data.episodes || data || []
+
+            if (Array.isArray(items) && items.length > 0) {
+                return items
+                    .map((ep: any) => ({
+                        id: `${slug}/${ep.number || ep.episode_number || ep.num}`,
+                        number: parseInt(ep.number || ep.episode_number || ep.num, 10),
+                        title: ep.title || ep.name || `Episode ${ep.number || ep.num}`,
+                        url: `${this.api}/episode/${slug}/${ep.number || ep.episode_number || ep.num}`,
+                    }))
+                    .sort((a: EpisodeDetails, b: EpisodeDetails) => a.number - b.number)
+            }
+        } catch (_) {}
+
+        // fallback: HTML scraping
         const html = await this.fetchText(
             `${this.api}/titles/${slug}`,
             `${this.api}/titles/${slug}`
@@ -100,7 +131,6 @@ class Provider {
 
         const episodesByNumber: { [key: string]: EpisodeDetails } = {}
 
-        // regex يمسك: /episode/{slug}/{number}
         const regexp = new RegExp(
             `href=["']/episode/${this.escapeRegExp(slug)}/(\\d+)["']`,
             "g"
@@ -118,7 +148,7 @@ class Provider {
             }
         }
 
-        // fallback: URL كاملة
+        // fallback 2: URL كاملة
         if (Object.keys(episodesByNumber).length === 0) {
             const fullRegexp = new RegExp(
                 `${this.escapeRegExp(this.api)}/episode/${this.escapeRegExp(slug)}/(\\d+)`,
@@ -152,16 +182,39 @@ class Provider {
             ? episode.id
             : episode.url.replace(`${this.api}/episode/`, "")
         const episodeUrl = `${this.api}/episode/${episodePath}`
+
+        // جرب API للحصول على player URL مباشرة
+        const slugAndNum = episodePath.split("/")
+        const slug = slugAndNum[0]
+        const num = slugAndNum[1]
+
+        try {
+            const apiRes = await this.fetchText(
+                `${this.api}/api/titles/${slug}/episodes/${num}`,
+                episodeUrl
+            )
+            const data = JSON.parse(apiRes)
+            const playerUrl = data.video_url || data.embed_url || data.player_url || ""
+
+            if (playerUrl) {
+                return await this.extractFromPlayer(playerUrl, episodeUrl)
+            }
+        } catch (_) {}
+
+        // fallback: scrape صفحة الحلقة
         const episodeHtml = await this.fetchText(episodeUrl, `${this.api}/`)
         const playerUrl = this.extractPlayerUrl(episodeHtml)
 
         if (!playerUrl) {
-            throw new Error("Failed to find player URL for episode: " + episodeUrl)
+            throw new Error("Failed to find player URL for: " + episodeUrl)
         }
 
-        const playerHtml = await this.fetchText(playerUrl, episodeUrl)
+        return await this.extractFromPlayer(playerUrl, episodeUrl)
+    }
 
-        // محاولة استخراج video_sources
+    async extractFromPlayer(playerUrl: string, referer: string): Promise<EpisodeServer> {
+        const playerHtml = await this.fetchText(playerUrl, referer)
+
         const sourceRegexp = /var\s+video_sources\s*=\s*(\[[\s\S]*?\]);/g
         let sourceMatch: RegExpExecArray | null
         let sourcePayload = ""
@@ -172,7 +225,6 @@ class Provider {
             }
         }
 
-        // fallback: ابحث عن array مباشرة
         if (!sourcePayload) {
             const altMatch = playerHtml.match(/sources\s*[:=]\s*(\[[\s\S]*?\])/)
             if (altMatch) sourcePayload = altMatch[1]
@@ -220,10 +272,17 @@ class Provider {
     async fetchText(url: string, referer: string): Promise<string> {
         const response = await fetch(url, {
             headers: {
-                Referer: referer,
                 "User-Agent": this.userAgent,
-                "Accept-Language": "ar,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": referer,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+                "Cache-Control": "max-age=0",
             },
         })
 
@@ -237,29 +296,17 @@ class Provider {
     extractPlayerUrl(html: string): string {
         const decoded = this.decodeHtml(html)
 
-        // محاولة 1: JSON مضمن {"video_url":"..."}
         const jsonMatch = decoded.match(/"video_url"\s*:\s*"(https?:[^"]+)"/)
-        if (jsonMatch && jsonMatch[1]) {
-            return jsonMatch[1].replace(/\\\//g, "/")
-        }
+        if (jsonMatch && jsonMatch[1]) return jsonMatch[1].replace(/\\\//g, "/")
 
-        // محاولة 2: رابط vid3rb مباشرة (escaped أو عادي)
         const vid3rbMatch = decoded.match(/https?:\\?\/\\?\/video\.vid3rb\.com\\?\/player\\?\/[^"'\s<>]+/)
-        if (vid3rbMatch && vid3rbMatch[0]) {
-            return vid3rbMatch[0].replace(/\\\//g, "/")
-        }
+        if (vid3rbMatch && vid3rbMatch[0]) return vid3rbMatch[0].replace(/\\\//g, "/")
 
-        // محاولة 3: أي iframe src
         const iframeMatch = decoded.match(/iframe[^>]+src=["'](https?:\/\/[^"']+)["']/)
-        if (iframeMatch && iframeMatch[1]) {
-            return iframeMatch[1]
-        }
+        if (iframeMatch && iframeMatch[1]) return iframeMatch[1]
 
-        // محاولة 4: data-src أو data-url
-        const dataMatch = decoded.match(/data-(?:src|url)=["'](https?:\/\/[^"']+)["']/)
-        if (dataMatch && dataMatch[1]) {
-            return dataMatch[1]
-        }
+        const dataMatch = decoded.match(/data-(?:src|url|embed)=["'](https?:\/\/[^"']+)["']/)
+        if (dataMatch && dataMatch[1]) return dataMatch[1]
 
         return ""
     }
