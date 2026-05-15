@@ -87,21 +87,23 @@ class Provider {
             const epUrl = this.api + "/episode/" + epPath
             const html = await this.get(epUrl, this.api + "/")
 
-            // Try JSON-LD embedUrl first
-            let playerUrl = ""
+            // Try iframe src first (has the token, vid3rb URL)
             const dec = this.dec(html)
-            const ld = dec.match(/"embedUrl"\s*:\s*"(https?:[^"]+)"/)
-            if (ld && ld[1]) {
-                playerUrl = ld[1].replace(/\\\//g, "/").replace(/&amp;/g, "&")
+            let playerUrl = ""
+            const ifr = dec.match(/iframe[^>]+src=["'](https?:\/\/[^"']+)["']/)
+            if (ifr && ifr[1]) {
+                playerUrl = ifr[1].replace(/&amp;/g, "&")
             }
 
-            // Try iframe src
+            // Fall back to JSON-LD embedUrl
             if (!playerUrl) {
-                const ifr = dec.match(/iframe[^>]+src=["'](https?:\/\/[^"']+)["']/)
-                if (ifr && ifr[1]) playerUrl = ifr[1].replace(/&amp;/g, "&")
+                const ld = dec.match(/"embedUrl"\s*:\s*"(https?:[^"]+)"/)
+                if (ld && ld[1]) {
+                    playerUrl = ld[1].replace(/\\\//g, "/").replace(/&amp;/g, "&")
+                }
             }
 
-            // Try data attribute
+            // Data attribute
             if (!playerUrl) {
                 const dat = dec.match(/data-(?:src|url|embed)=["'](https?:\/\/[^"']+)["']/)
                 if (dat && dat[1]) playerUrl = dat[1].replace(/&amp;/g, "&")
@@ -284,6 +286,7 @@ class Provider {
             timeout: 35,
         })
         if (!res.ok) throw new Error("HTTP " + res.status + " -- " + url)
+        // Return res.text() - the body is already decoded by Seanime's fetch
         return res.text()
     }
 
