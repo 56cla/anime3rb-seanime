@@ -207,7 +207,7 @@ class Provider {
             const vids: VideoSource[] = []
             for (const s of sources) {
                 if (!s || !s.src || s.premium) continue
-                var src = s.src.replace(/\\\/g, "/")
+                var src = s.src.split("\\/").join("/")
                 var mime = (s.type || "").toLowerCase()
                 var ext = src.toLowerCase()
                 var vidType = "unknown"
