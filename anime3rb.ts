@@ -19,7 +19,6 @@ class Provider {
             if (opts.media && opts.media.englishTitle) names.push(opts.media.englishTitle)
             if (opts.query) names.push(opts.query)
 
-            // Collect slug candidates from all names
             const candidates: string[] = []
             for (const n of names) {
                 const slugs = this.makeSlugs(n)
@@ -54,7 +53,6 @@ class Provider {
             while (true) {
                 idx = html.indexOf(searchStr, idx)
                 if (idx === -1) break
-                // Find the end of the number
                 var start = idx + searchStr.length
                 var end = start
                 while (end < html.length && html.charAt(end) >= "0" && html.charAt(end) <= "9") {
@@ -82,175 +80,172 @@ class Provider {
     }
 
     async findEpisodeServer(episode: EpisodeDetails, _server: string): Promise<EpisodeServer> {
+        const empty: EpisodeServer = { server: "Anime3rb", headers: { "User-Agent": this.userAgent }, videoSources: [] }
         try {
             const epPath = episode.id.indexOf("/") >= 0 ? episode.id : episode.url.replace(this.api + "/episode/", "")
             const epUrl = this.api + "/episode/" + epPath
+
+            // Step 1: Get the episode page
             const html = await this.get(epUrl, this.api + "/")
-
-            // Extract all possible player URLs from the episode page
             const dec = this.dec(html)
-            let playerUrl = ""
-            let embedUrl = ""
-            var uuid = ""
 
-            // 1) iframe src (vid3rb URL with token)
+            var playerUrl = ""
+            var uuid = ""
+            var token = ""
+
+            // Extract iframe src (vid3rb player URL with token)
             const ifr = dec.match(/iframe[^>]+src=["'](https?:\/\/[^"']+)["']/)
             if (ifr && ifr[1]) {
                 playerUrl = ifr[1].replace(/&amp;/g, "&")
-                var u = playerUrl.match(/player\/([a-f0-9-]+)/)
-                if (u) uuid = u[1]
+                var um = playerUrl.match(/player\/([a-f0-9-]+)/)
+                if (um) uuid = um[1]
+                var tm = playerUrl.match(/[?&]token=([a-f0-9]+)/)
+                if (tm) token = tm[1]
             }
 
-            // 2) JSON-LD embedUrl (anime3rb.com/embed/)
-            if (!embedUrl) {
+            // Also try JSON-LD embedUrl
+            if (!uuid) {
                 const ld = dec.match(/"embedUrl"\s*:\s*"(https?:[^"]+)"/)
                 if (ld && ld[1]) {
-                    embedUrl = ld[1].replace(/\\\//g, "/").replace(/&amp;/g, "&")
-                    if (!uuid) {
-                        var u2 = embedUrl.match(/embed\/([a-f0-9-]+)/)
-                        if (u2) uuid = u2[1]
+                    var embedUrl = ld[1].replace(/\\\//g, "/").replace(/&amp;/g, "&")
+                    var um2 = embedUrl.match(/embed\/([a-f0-9-]+)/)
+                    if (um2) uuid = um2[1]
+                    if (!token) {
+                        var tm2 = embedUrl.match(/[?&]token=([a-f0-9]+)/)
+                        if (tm2) token = tm2[1]
                     }
                 }
             }
 
-            if (!playerUrl && !embedUrl) {
-                return { server: "Anime3rb", headers: { Referer: epUrl, "User-Agent": this.userAgent }, videoSources: [] }
-            }
+            if (!uuid) return empty
 
-            // Try to get video sources from multiple approaches
-            let sources: any[] = []
+            // Step 2: Fetch the player page to get the real m3u8 sources
+            // We fetch it with proper browser-like headers including the token as cookie
+            var referer = playerUrl || (this.videoApi + "/player/" + uuid + "?token=" + token)
+            var playerHtml = ""
+            try {
+                var playerRes = await fetch(referer, {
+                    headers: {
+                        "User-Agent": this.userAgent,
+                        "Referer": epUrl,
+                        "Origin": this.api,
+                        "Accept": "text/html,application/xhtml+xml,*/*",
+                        "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+                        "Cookie": token ? "token=" + token : "",
+                    },
+                    noCloudflareBypass: false,
+                    timeout: 20,
+                })
+                if (playerRes.ok) playerHtml = this.dec(playerRes.text())
+            } catch (e) {}
 
-            // Extract token from player URL
-            var token = ""
-            var tMatch = playerUrl.match(/token=([a-f0-9]+)/)
-            if (tMatch) token = tMatch[1]
+            // Step 3: Extract sources from player page
+            var sources: any[] = []
 
-            // Helper to try fetching a JSON API endpoint
-            var _this = this
-            const tryAPI = async function(baseUrl, refTok) {
-                try {
-                    var r = await fetch(baseUrl, {
-                        headers: { "User-Agent": _this.userAgent, "Referer": refTok || epUrl, "Accept": "application/json", "Origin": _this.api },
-                        noCloudflareBypass: false,
-                        timeout: 15,
-                    })
-                    if (r.ok) {
-                        var b = r.json()
-                        var items = b && b.data ? b.data : (b && b.sources ? b.sources : (b && b.results ? b.results : b))
-                        if (Array.isArray(items) && items.length > 0) return items
+            if (playerHtml) {
+                // Pattern 1: var video_sources = [...]
+                var m1 = playerHtml.match(/var\s+video_sources\s*=\s*(\[[\s\S]*?\]);/)
+                if (m1 && m1[1]) {
+                    try { sources = JSON.parse(m1[1]) } catch (e) {}
+                }
+                // Pattern 2: sources: [...] or "sources": [...]
+                if (!sources.length) {
+                    var m2 = playerHtml.match(/["\s]sources["\s]*[:=]\s*(\[[\s\S]*?\])/)
+                    if (m2 && m2[1]) {
+                        try { sources = JSON.parse(m2[1]) } catch (e) {}
                     }
-                } catch (e) {}
-                return null
+                }
+                // Pattern 3: file: "url.m3u8" or src: "url.m3u8"
+                if (!sources.length) {
+                    var m3 = playerHtml.match(/(?:file|src)\s*:\s*["']([^"']+\.m3u8[^"']*)["']/)
+                    if (m3 && m3[1]) {
+                        sources = [{ src: m3[1].replace(/&amp;/g, "&"), type: "application/x-mpegURL", label: "Auto" }]
+                    }
+                }
+                // Pattern 4: "file":"url" json style
+                if (!sources.length) {
+                    var m4 = playerHtml.match(/"file"\s*:\s*"([^"]+\.m3u8[^"]*)"/)
+                    if (m4 && m4[1]) {
+                        sources = [{ src: m4[1].replace(/\\\/|\\\//g, "/").replace(/&amp;/g, "&"), type: "application/x-mpegURL", label: "Auto" }]
+                    }
+                }
             }
 
-            // API endpoint patterns to try (vid3rb.com)
-            if (uuid && token) {
-                var apis = [
-                    "/api/sources/", "/api/video/", "/api/manifest/",
-                    "/api/stream/", "/api/play/", "/api/url/",
-                    "/source/", "/hls/",
+            // Step 4: If no sources from player page, build m3u8 URL directly
+            // vid3rb serves HLS at /hls/{uuid}/master.m3u8?token=xxx or /hls/{uuid}/index.m3u8?token=xxx
+            if (!sources.length && uuid && token) {
+                var directUrls = [
+                    this.videoApi + "/hls/" + uuid + "/master.m3u8?token=" + token,
+                    this.videoApi + "/hls/" + uuid + "/index.m3u8?token=" + token,
+                    this.videoApi + "/stream/" + uuid + "/master.m3u8?token=" + token,
+                    this.videoApi + "/video/" + uuid + "/master.m3u8?token=" + token,
                 ]
-                for (var i = 0; i < apis.length; i++) {
-                    var apiUrl = this.videoApi + apis[i] + uuid + "?token=" + token
-                    var result = await tryAPI(apiUrl, epUrl)
-                    if (result) { sources = result; break }
+                for (var di = 0; di < directUrls.length; di++) {
+                    try {
+                        var testRes = await fetch(directUrls[di], {
+                            headers: {
+                                "User-Agent": this.userAgent,
+                                "Referer": referer,
+                                "Origin": this.videoApi,
+                                "Cookie": token ? "token=" + token : "",
+                            },
+                            noCloudflareBypass: false,
+                            timeout: 8,
+                        })
+                        if (testRes.ok) {
+                            var testBody = testRes.text()
+                            if (testBody.indexOf("#EXTM3U") >= 0 || testBody.indexOf("#EXT-X") >= 0) {
+                                sources = [{ src: directUrls[di], type: "application/x-mpegURL", label: "Auto" }]
+                                break
+                            }
+                        }
+                    } catch (e) {}
                 }
             }
 
-            // Try embed URL (same domain - might return HTML with sources)
-            if (sources.length === 0 && embedUrl) {
-                try {
-                    var embedHtml = await this.get(embedUrl, epUrl)
-                    var embedDec = this.dec(embedHtml)
-                    // Look for video source patterns in the embed page
-                    var pats = [/var\s+video_sources\s*=\s*(\[[\s\S]*?\]);/g, /sources\s*[:=]\s*(\[[\s\S]*?\])/g, /"sources"\s*:\s*(\[[\s\S]*?\])/g, /src:\s*["']([^"']+)["']/g]
-                    for (var pi = 0; pi < pats.length; pi++) {
-                        var sm = pats[pi].exec(embedDec)
-                        if (sm && sm[1]) {
-                            try {
-                                var parsed = JSON.parse(sm[1])
-                                if (Array.isArray(parsed) && parsed.length > 0) { sources = parsed; break }
-                            } catch (ex) {
-                                if (sm[1].indexOf("http") >= 0) {
-                                    sources = [{ src: sm[1], type: "mp4", label: "Auto", res: "Auto", premium: false }]
-                                    break
-                                }
-                            }
-                        }
-                    }
-                } catch (e) {}
-            }
-            
-            // Try the player page HTML directly
-            if (sources.length === 0 && playerUrl) {
-                try {
-                    var ph = await this.get(playerUrl, epUrl)
-                    var pd = this.dec(ph)
-                    var pats = [/var\s+video_sources\s*=\s*(\[[\s\S]*?\]);/g, /sources\s*[:=]\s*(\[[\s\S]*?\])/g, /"sources"\s*:\s*(\[[\s\S]*?\])/g, /src:\s*["']([^"']+)["']/g]
-                    for (var pi = 0; pi < pats.length; pi++) {
-                        var sm = pats[pi].exec(pd)
-                        if (sm && sm[1]) {
-                            try {
-                                var parsed = JSON.parse(sm[1])
-                                if (Array.isArray(parsed) && parsed.length > 0) { sources = parsed; break }
-                            } catch (ex) {
-                                if (sm[1].indexOf("http") >= 0) {
-                                    sources = [{ src: sm[1], type: "mp4", label: "Auto", res: "Auto", premium: false }]
-                                    break
-                                }
-                            }
-                        }
-                    }
-                } catch (e) {}
-            }
-
+            // Step 5: Build VideoSources
             const vids: VideoSource[] = []
-            for (const s of sources) {
+            for (var si = 0; si < sources.length; si++) {
+                var s = sources[si]
                 if (!s || !s.src || s.premium) continue
-                var src = s.src.split("\\/").join("/")
+                var src = s.src.split("\\/").join("/").replace(/&amp;/g, "&")
                 var mime = (s.type || "").toLowerCase()
                 var ext = src.toLowerCase()
-                var vidType = "unknown"
-                if (mime.indexOf("mp4") >= 0 || ext.indexOf(".mp4") >= 0) vidType = "mp4"
-                else if (mime.indexOf("mpegurl") >= 0 || mime.indexOf("x-mpegurl") >= 0 || ext.indexOf(".m3u8") >= 0) vidType = "m3u8"
-                // Append token to vid3rb HLS URLs that don't already have one
-                if (vidType === "m3u8" && token && src.indexOf(this.videoApi) === 0 && src.indexOf("token=") === -1) {
+
+                // Append token if missing from vid3rb URLs
+                if ((ext.indexOf(".m3u8") >= 0 || mime.indexOf("mpegurl") >= 0) &&
+                    token && src.indexOf(this.videoApi) === 0 &&
+                    src.indexOf("token=") === -1) {
                     src = src + (src.indexOf("?") >= 0 ? "&" : "?") + "token=" + token
                 }
+
+                var vidType = "unknown"
+                if (ext.indexOf(".mp4") >= 0 || mime.indexOf("mp4") >= 0) {
+                    vidType = "mp4"
+                } else if (ext.indexOf(".m3u8") >= 0 || mime.indexOf("mpegurl") >= 0) {
+                    vidType = "m3u8"
+                }
+
                 vids.push({
                     url: src,
                     type: vidType,
                     quality: this.cln(s.label || s.res || "Auto"),
-                    label: this.cln(s.res || s.label || ""),
                     subtitles: [],
                 })
-            }
-
-            // Ultimate fallback: return player URL as source
-            if (vids.length === 0) {
-                var fallbackUrl = playerUrl || embedUrl || ""
-                if (fallbackUrl) {
-                    vids.push({
-                        url: fallbackUrl,
-                        type: "unknown",
-                        quality: "Auto",
-                        subtitles: [],
-                    })
-                }
             }
 
             return {
                 server: "Anime3rb",
                 headers: {
-                    Referer: playerUrl || embedUrl || epUrl,
-                    Origin: this.videoApi,
+                    "Referer": referer,
+                    "Origin": this.videoApi,
                     "User-Agent": this.userAgent,
-                    "Cookie": token ? "token=" + token + ";" : "",
+                    "Cookie": token ? "token=" + token : "",
                 },
                 videoSources: vids,
             }
         } catch (e) {
-            return { server: "Anime3rb", headers: { Referer: this.api + "/", "User-Agent": this.userAgent }, videoSources: [] }
+            return empty
         }
     }
 
@@ -259,9 +254,7 @@ class Provider {
     makeSlugs(name: string): string[] {
         if (!name) return []
         let s = name.toLowerCase().trim()
-        // Strip parenthetical suffixes
         s = s.replace(/\([^)]*\)/g, "").trim()
-        // Accent normalisation
         const accents: [RegExp, string][] = [
             [/[\u00e9\u00e8\u00ea\u00eb]/g, "e"], [/[\u00e1\u00e0\u00e2\u00e4]/g, "a"],
             [/[\u00ed\u00ec\u00ee\u00ef]/g, "i"], [/[\u00f3\u00f2\u00f4\u00f6]/g, "o"],
@@ -269,10 +262,8 @@ class Provider {
             [/[\u00e7]/g, "c"], [/[\u014d]/g, "o"], [/[\u016b]/g, "u"], [/[\u0101]/g, "a"],
         ]
         for (const [re, ch] of accents) s = s.replace(re, ch)
-        // Punctuation to space
         s = s.replace(/['':;.\u3001\u3002\uff01\uff1f\u30fb]/g, " ")
         s = s.replace(/\s*;\s*/g, "-")
-        // Keep only alphanumeric, Arabic, hyphens
         s = s.replace(/[^a-z0-9\s\u0600-\u06FF-]/g, " ")
         s = s.replace(/\s+/g, "-")
         s = s.replace(/-+/g, "-")
@@ -281,7 +272,6 @@ class Provider {
 
         const slugs: string[] = [s]
 
-        // Strip stop words
         const stripSW = function (x: string): string {
             let r = x
             for (const w of ["no", "to", "the", "a", "an", "of", "and", "wa", "ga", "ni", "o", "de", "mo"]) {
@@ -292,11 +282,9 @@ class Provider {
         const stripped = stripSW(s)
         if (stripped !== s && slugs.indexOf(stripped) === -1) slugs.push(stripped)
 
-        // Without season/part/cour
         const noPart = s.replace(/-season-\d+/g, "").replace(/-part-\d+/g, "").replace(/-cour-\d+/g, "")
         if (noPart !== s && slugs.indexOf(noPart) === -1) slugs.push(noPart)
 
-        // Combined
         const combo = stripSW(noPart)
         if (combo !== stripped && combo !== noPart && combo !== s && slugs.indexOf(combo) === -1) slugs.push(combo)
 
@@ -338,7 +326,6 @@ class Provider {
             timeout: 35,
         })
         if (!res.ok) throw new Error("HTTP " + res.status + " -- " + url)
-        // Return res.text() - the body is already decoded by Seanime's fetch
         return res.text()
     }
 
@@ -346,10 +333,6 @@ class Provider {
         return (v || "")
             .replace(/&quot;/g, "\"").replace(/&#039;/g, "'")
             .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    }
-
-    esc(v: string): string {
-        return v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
     }
 
     cln(v: string): string {
