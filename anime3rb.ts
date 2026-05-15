@@ -121,10 +121,28 @@ class Provider {
             // Try to get video sources
             let sources: any[] = []
 
-            // Try player/embed page
-            for (const url of [playerUrl]) {
+            // Try 1: vid3rb API endpoint (returns JSON with source URLs)
+            try {
+                var uuidMatch = playerUrl.match(/player\/([a-f0-9-]+)/)
+                var tokenMatch = playerUrl.match(/token=([a-f0-9]+)/)
+                if (uuidMatch && tokenMatch) {
+                    var apiUrl = this.videoApi + "/api/sources/" + uuidMatch[1] + "?token=" + tokenMatch[1]
+                    var apiRes = await fetch(apiUrl, {
+                        headers: { "User-Agent": this.userAgent, "Referer": epUrl, "Accept": "application/json", "Origin": this.api },
+                        noCloudflareBypass: false,
+                    })
+                    if (apiRes.ok) {
+                        var body = apiRes.json()
+                        var items = body && body.data ? body.data : (body && body.sources ? body.sources : (body && body.results ? body.results : body))
+                        if (Array.isArray(items) && items.length > 0) sources = items
+                    }
+                }
+            } catch (e) { }
+
+            // Try 2: Fetch the player/embed page HTML
+            if (sources.length === 0) {
                 try {
-                    const ph = await this.get(url, epUrl)
+                    const ph = await this.get(playerUrl, epUrl)
                     const pd = this.dec(ph)
                     const srcPats = [/var\s+video_sources\s*=\s*(\[[\s\S]*?\]);/g, /sources\s*[:=]\s*(\[[\s\S]*?\])/g, /"sources"\s*:\s*(\[[\s\S]*?\])/g]
                     for (const pat of srcPats) {
@@ -143,7 +161,6 @@ class Provider {
                         if (sources.length > 0) break
                     }
                 } catch (e) { }
-                if (sources.length > 0) break
             }
 
             const vids: VideoSource[] = []
