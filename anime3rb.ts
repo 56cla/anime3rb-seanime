@@ -207,12 +207,16 @@ class Provider {
             const vids: VideoSource[] = []
             for (const s of sources) {
                 if (!s || !s.src || s.premium) continue
-                var src = s.src.replace(/\\\\\\//g, "/")
+                var src = s.src.replace(/\\\/g, "/")
                 var mime = (s.type || "").toLowerCase()
                 var ext = src.toLowerCase()
                 var vidType = "unknown"
                 if (mime.indexOf("mp4") >= 0 || ext.indexOf(".mp4") >= 0) vidType = "mp4"
                 else if (mime.indexOf("mpegurl") >= 0 || mime.indexOf("x-mpegurl") >= 0 || ext.indexOf(".m3u8") >= 0) vidType = "hls"
+                // Append token to vid3rb HLS URLs that don't already have one
+                if (vidType === "hls" && token && src.indexOf(this.videoApi) === 0 && src.indexOf("token=") === -1) {
+                    src = src + (src.indexOf("?") >= 0 ? "&" : "?") + "token=" + token
+                }
                 vids.push({
                     url: src,
                     type: vidType,
