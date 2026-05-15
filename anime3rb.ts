@@ -175,6 +175,17 @@ class Provider {
                 })
             }
 
+            // If no sources found via extraction, return the player URL directly
+            // Seanime may be able to handle it in a webview/iframe
+            if (vids.length === 0 && playerUrl) {
+                vids.push({
+                    url: playerUrl,
+                    type: "unknown",
+                    quality: "Auto",
+                    subtitles: [],
+                })
+            }
+
             return {
                 server: "Anime3rb",
                 headers: {
@@ -268,11 +279,9 @@ class Provider {
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
                 "Connection": "keep-alive",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "same-origin",
-                "Cache-Control": "max-age=0",
             },
+            noCloudflareBypass: false,
+            timeout: 35,
         })
         if (!res.ok) throw new Error("HTTP " + res.status + " -- " + url)
         return res.text()
