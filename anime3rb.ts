@@ -126,11 +126,12 @@ class Provider {
             if (tMatch) token = tMatch[1]
 
             // Helper to try fetching a JSON API endpoint
+            var _this = this
             const tryAPI = async function(baseUrl, refTok) {
                 try {
                     var r = await fetch(baseUrl, {
-                        headers: { "User-Agent": this.userAgent, "Referer": epUrl, "Accept": "application/json", "Origin": this.api },
-                        noCloudflareBypass: true,
+                        headers: { "User-Agent": _this.userAgent, "Referer": refTok || epUrl, "Accept": "application/json", "Origin": _this.api },
+                        noCloudflareBypass: false,
                         timeout: 15,
                     })
                     if (r.ok) {
