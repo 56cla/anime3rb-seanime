@@ -48,54 +48,31 @@ class Provider {
     async findEpisodes(id: string): Promise<EpisodeDetails[]> {
         try {
             const html = await this.get(this.api + "/titles/" + id, this.api + "/titles/" + id)
-
             const map: { [key: number]: EpisodeDetails } = {}
-
-            // Relative URL pattern
-            let re = new RegExp('href=["\']/episode/' + this.esc(id) + '/(\\d+)["\']', 'gi')
-            let m: RegExpExecArray | null
-            while ((m = re.exec(html)) !== null) {
-                const n = parseInt(m[1], 10)
-                if (n && !map[n]) {
-                    map[n] = { id: id + "/" + n, number: n, title: "Episode " + n, url: this.api + "/episode/" + id + "/" + n }
+            const searchStr = this.api + "/episode/" + id + "/"
+            var idx = 0
+            while (true) {
+                idx = html.indexOf(searchStr, idx)
+                if (idx === -1) break
+                // Find the end of the number
+                var start = idx + searchStr.length
+                var end = start
+                while (end < html.length && html.charAt(end) >= "0" && html.charAt(end) <= "9") {
+                    end++
                 }
-            }
-
-            // Absolute URL pattern
-            if (Object.keys(map).length === 0) {
-                re = new RegExp('href=["\']' + this.esc(this.api) + '/episode/' + this.esc(id) + '/(\\d+)["\']', 'gi')
-                while ((m = re.exec(html)) !== null) {
-                    const n = parseInt(m[1], 10)
+                if (end > start) {
+                    var n = parseInt(html.substring(start, end), 10)
                     if (n && !map[n]) {
-                        map[n] = { id: id + "/" + n, number: n, title: "Episode " + n, url: this.api + "/episode/" + id + "/" + n }
+                        map[n] = {
+                            id: id + "/" + n,
+                            number: n,
+                            title: "Episode " + n,
+                            url: this.api + "/episode/" + id + "/" + n,
+                        }
                     }
                 }
+                idx = end
             }
-
-            // Broad absolute pattern
-            if (Object.keys(map).length === 0) {
-                re = /href=["']https?:\/\/[^"']+\/episode\/([^"'\/]+)\/(\d+)["']/gi
-                while ((m = re.exec(html)) !== null) {
-                    const slug = m[1]
-                    const n = parseInt(m[2], 10)
-                    if (n && !map[n]) {
-                        map[n] = { id: slug + "/" + n, number: n, title: "Episode " + n, url: this.api + "/episode/" + slug + "/" + n }
-                    }
-                }
-            }
-
-            // Broad relative pattern
-            if (Object.keys(map).length === 0) {
-                re = /href=["']\/episode\/([^"'\/]+)\/(\d+)["']/gi
-                while ((m = re.exec(html)) !== null) {
-                    const slug = m[1]
-                    const n = parseInt(m[2], 10)
-                    if (n && !map[n]) {
-                        map[n] = { id: slug + "/" + n, number: n, title: "Episode " + n, url: this.api + "/episode/" + slug + "/" + n }
-                    }
-                }
-            }
-
             const out: EpisodeDetails[] = Object.keys(map).map(function (k) { return map[parseInt(k, 10)] })
             out.sort(function (a, b) { return a.number - b.number })
             return out
