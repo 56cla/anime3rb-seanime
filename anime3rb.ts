@@ -92,37 +92,37 @@ class Provider {
         )
 
         const episodes = new Map<number, EpisodeDetails>()
-        const re = new RegExp(
-            `href=["']/episode/${this.escapeRe(slug)}/(\\d+)[\"']`,
-            "gi"
-        )
-        let m: RegExpExecArray | null
-        while ((m = re.exec(html)) !== null) {
-            const n = parseInt(m[1], 10)
-            if (n && !episodes.has(n)) {
-                episodes.set(n, {
-                    id: `${slug}/${n}`,
-                    number: n,
-                    title: `Episode ${n}`,
-                    url: `${this.api}/episode/${slug}/${n}`,
-                })
-            }
-        }
 
-        // Fallback: broad pattern for any episode link on the page
-        if (episodes.size === 0) {
-            const re2 = /href=["']\/episode\/([^"'\/]+)\/(\d+)["']/gi
-            while ((m = re2.exec(html)) !== null) {
-                const n = parseInt(m[2], 10)
+        // Patterns handle both relative (href="/episode/...") and absolute
+        // (href="https://anime3rb.com/episode/...") URLs.
+        const patterns = [
+            // Relative, specific slug
+            new RegExp(`href=["']/episode/${this.escapeRe(slug)}/(\\d+)[\"']`, "gi"),
+            // Absolute, specific slug
+            new RegExp(`href=["']${this.escapeRe(this.api)}/episode/${this.escapeRe(slug)}/(\\d+)[\"']`, "gi"),
+            // Relative, any slug (broad fallback)
+            /href=["']\/episode\/([^"'\/]+)\/(\d+)["']/gi,
+            // Absolute, any slug (broad fallback)
+            /href=["']https?:\/\/[^"']+\/episode\/([^"'\/]+)\/(\d+)["']/gi,
+        ]
+
+        let m: RegExpExecArray | null
+        for (const re of patterns) {
+            while ((m = re.exec(html)) !== null) {
+                const epSlug = m[1] && m.length === 3 ? m[1] : slug
+                const numIdx = m.length === 3 ? 2 : 1
+                const n = parseInt(m[numIdx], 10)
+                const candidateSlug = m[1] && m.length === 3 ? m[1] : slug
                 if (n && !episodes.has(n)) {
                     episodes.set(n, {
-                        id: `${slug}/${n}`,
+                        id: `${candidateSlug}/${n}`,
                         number: n,
                         title: `Episode ${n}`,
-                        url: `${this.api}/episode/${slug}/${n}`,
+                        url: `${this.api}/episode/${candidateSlug}/${n}`,
                     })
                 }
             }
+            if (episodes.size > 0) break
         }
 
         return Array.from(episodes.values()).sort((a, b) => a.number - b.number)
