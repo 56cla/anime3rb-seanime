@@ -207,9 +207,15 @@ class Provider {
             const vids: VideoSource[] = []
             for (const s of sources) {
                 if (!s || !s.src || s.premium) continue
+                var src = s.src.replace(/\\\\\\//g, "/")
+                var mime = (s.type || "").toLowerCase()
+                var ext = src.toLowerCase()
+                var vidType = "unknown"
+                if (mime.indexOf("mp4") >= 0 || ext.indexOf(".mp4") >= 0) vidType = "mp4"
+                else if (mime.indexOf("mpegurl") >= 0 || mime.indexOf("x-mpegurl") >= 0 || ext.indexOf(".m3u8") >= 0) vidType = "hls"
                 vids.push({
-                    url: s.src.replace(/\\\//g, "/"),
-                    type: s.type && s.type.indexOf("mp4") >= 0 ? "mp4" : "unknown",
+                    url: src,
+                    type: vidType,
                     quality: this.cln(s.label || s.res || "Auto"),
                     label: this.cln(s.res || s.label || ""),
                     subtitles: [],
