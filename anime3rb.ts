@@ -87,82 +87,120 @@ class Provider {
             const epUrl = this.api + "/episode/" + epPath
             const html = await this.get(epUrl, this.api + "/")
 
-            // Try iframe src first (has the token, vid3rb URL)
+            // Extract all possible player URLs from the episode page
             const dec = this.dec(html)
             let playerUrl = ""
+            let embedUrl = ""
+            var uuid = ""
+
+            // 1) iframe src (vid3rb URL with token)
             const ifr = dec.match(/iframe[^>]+src=["'](https?:\/\/[^"']+)["']/)
             if (ifr && ifr[1]) {
                 playerUrl = ifr[1].replace(/&amp;/g, "&")
+                var u = playerUrl.match(/player\/([a-f0-9-]+)/)
+                if (u) uuid = u[1]
             }
 
-            // Fall back to JSON-LD embedUrl
-            if (!playerUrl) {
+            // 2) JSON-LD embedUrl (anime3rb.com/embed/)
+            if (!embedUrl) {
                 const ld = dec.match(/"embedUrl"\s*:\s*"(https?:[^"]+)"/)
                 if (ld && ld[1]) {
-                    playerUrl = ld[1].replace(/\\\//g, "/").replace(/&amp;/g, "&")
+                    embedUrl = ld[1].replace(/\\\//g, "/").replace(/&amp;/g, "&")
+                    if (!uuid) {
+                        var u2 = embedUrl.match(/embed\/([a-f0-9-]+)/)
+                        if (u2) uuid = u2[1]
+                    }
                 }
             }
 
-            // Data attribute
-            if (!playerUrl) {
-                const dat = dec.match(/data-(?:src|url|embed)=["'](https?:\/\/[^"']+)["']/)
-                if (dat && dat[1]) playerUrl = dat[1].replace(/&amp;/g, "&")
-            }
-
-            if (!playerUrl) {
+            if (!playerUrl && !embedUrl) {
                 return { server: "Anime3rb", headers: { Referer: epUrl, "User-Agent": this.userAgent }, videoSources: [] }
             }
 
-            // Resolve relative
-            if (playerUrl.indexOf("http") !== 0) {
-                if (playerUrl.indexOf("//") === 0) playerUrl = "https:" + playerUrl
-                else if (playerUrl.indexOf("/") === 0) playerUrl = this.api + playerUrl
-                else playerUrl = this.api + "/" + playerUrl
-            }
-
-            // Try to get video sources
+            // Try to get video sources from multiple approaches
             let sources: any[] = []
 
-            // Try 1: vid3rb API endpoint (returns JSON with source URLs)
-            try {
-                var uuidMatch = playerUrl.match(/player\/([a-f0-9-]+)/)
-                var tokenMatch = playerUrl.match(/token=([a-f0-9]+)/)
-                if (uuidMatch && tokenMatch) {
-                    var apiUrl = this.videoApi + "/api/sources/" + uuidMatch[1] + "?token=" + tokenMatch[1]
-                    var apiRes = await fetch(apiUrl, {
-                        headers: { "User-Agent": this.userAgent, "Referer": epUrl, "Accept": "application/json", "Origin": this.api },
-                        noCloudflareBypass: false,
-                    })
-                    if (apiRes.ok) {
-                        var body = apiRes.json()
-                        var items = body && body.data ? body.data : (body && body.sources ? body.sources : (body && body.results ? body.results : body))
-                        if (Array.isArray(items) && items.length > 0) sources = items
-                    }
-                }
-            } catch (e) { }
+            // Extract token from player URL
+            var token = ""
+            var tMatch = playerUrl.match(/token=([a-f0-9]+)/)
+            if (tMatch) token = tMatch[1]
 
-            // Try 2: Fetch the player/embed page HTML
-            if (sources.length === 0) {
+            // Helper to try fetching a JSON API endpoint
+            const tryAPI = async function(baseUrl, refTok) {
                 try {
-                    const ph = await this.get(playerUrl, epUrl)
-                    const pd = this.dec(ph)
-                    const srcPats = [/var\s+video_sources\s*=\s*(\[[\s\S]*?\]);/g, /sources\s*[:=]\s*(\[[\s\S]*?\])/g, /"sources"\s*:\s*(\[[\s\S]*?\])/g]
-                    for (const pat of srcPats) {
-                        let sm: RegExpExecArray | null
-                        while ((sm = pat.exec(pd)) !== null) {
-                            if (sm[1] && sm[1] !== "[]") {
-                                try {
-                                    const parsed = JSON.parse(sm[1])
-                                    if (Array.isArray(parsed) && parsed.length > 0) {
-                                        sources = parsed
-                                        break
-                                    }
-                                } catch (e) { }
+                    var r = await fetch(baseUrl, {
+                        headers: { "User-Agent": this.userAgent, "Referer": epUrl, "Accept": "application/json", "Origin": this.api },
+                        noCloudflareBypass: true,
+                        timeout: 15,
+                    })
+                    if (r.ok) {
+                        var b = r.json()
+                        var items = b && b.data ? b.data : (b && b.sources ? b.sources : (b && b.results ? b.results : b))
+                        if (Array.isArray(items) && items.length > 0) return items
+                    }
+                } catch (e) {}
+                return null
+            }
+
+            // API endpoint patterns to try (vid3rb.com)
+            if (uuid && token) {
+                var apis = [
+                    "/api/sources/", "/api/video/", "/api/manifest/",
+                    "/api/stream/", "/api/play/", "/api/url/",
+                    "/source/", "/hls/",
+                ]
+                for (var i = 0; i < apis.length; i++) {
+                    var apiUrl = this.videoApi + apis[i] + uuid + "?token=" + token
+                    var result = await tryAPI(apiUrl, epUrl)
+                    if (result) { sources = result; break }
+                }
+            }
+
+            // Try embed URL (same domain - might return HTML with sources)
+            if (sources.length === 0 && embedUrl) {
+                try {
+                    var embedHtml = await this.get(embedUrl, epUrl)
+                    var embedDec = this.dec(embedHtml)
+                    // Look for video source patterns in the embed page
+                    var pats = [/var\s+video_sources\s*=\s*(\[[\s\S]*?\]);/g, /sources\s*[:=]\s*(\[[\s\S]*?\])/g, /"sources"\s*:\s*(\[[\s\S]*?\])/g, /src:\s*["']([^"']+)["']/g]
+                    for (var pi = 0; pi < pats.length; pi++) {
+                        var sm = pats[pi].exec(embedDec)
+                        if (sm && sm[1]) {
+                            try {
+                                var parsed = JSON.parse(sm[1])
+                                if (Array.isArray(parsed) && parsed.length > 0) { sources = parsed; break }
+                            } catch (ex) {
+                                if (sm[1].indexOf("http") >= 0) {
+                                    sources = [{ src: sm[1], type: "mp4", label: "Auto", res: "Auto", premium: false }]
+                                    break
+                                }
                             }
                         }
-                        if (sources.length > 0) break
                     }
-                } catch (e) { }
+                } catch (e) {}
+            }
+            
+            // Try the player page HTML directly
+            if (sources.length === 0 && playerUrl) {
+                try {
+                    var ph = await this.get(playerUrl, epUrl)
+                    var pd = this.dec(ph)
+                    var pats = [/var\s+video_sources\s*=\s*(\[[\s\S]*?\]);/g, /sources\s*[:=]\s*(\[[\s\S]*?\])/g, /"sources"\s*:\s*(\[[\s\S]*?\])/g, /src:\s*["']([^"']+)["']/g]
+                    for (var pi = 0; pi < pats.length; pi++) {
+                        var sm = pats[pi].exec(pd)
+                        if (sm && sm[1]) {
+                            try {
+                                var parsed = JSON.parse(sm[1])
+                                if (Array.isArray(parsed) && parsed.length > 0) { sources = parsed; break }
+                            } catch (ex) {
+                                if (sm[1].indexOf("http") >= 0) {
+                                    sources = [{ src: sm[1], type: "mp4", label: "Auto", res: "Auto", premium: false }]
+                                    break
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {}
             }
 
             const vids: VideoSource[] = []
@@ -177,21 +215,23 @@ class Provider {
                 })
             }
 
-            // If no sources found via extraction, return the player URL directly
-            // Seanime may be able to handle it in a webview/iframe
-            if (vids.length === 0 && playerUrl) {
-                vids.push({
-                    url: playerUrl,
-                    type: "unknown",
-                    quality: "Auto",
-                    subtitles: [],
-                })
+            // Ultimate fallback: return player URL as source
+            if (vids.length === 0) {
+                var fallbackUrl = playerUrl || embedUrl || ""
+                if (fallbackUrl) {
+                    vids.push({
+                        url: fallbackUrl,
+                        type: "unknown",
+                        quality: "Auto",
+                        subtitles: [],
+                    })
+                }
             }
 
             return {
                 server: "Anime3rb",
                 headers: {
-                    Referer: playerUrl,
+                    Referer: playerUrl || embedUrl || epUrl,
                     Origin: this.videoApi,
                     "User-Agent": this.userAgent,
                 },
